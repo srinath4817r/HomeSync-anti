@@ -1,0 +1,186 @@
+import { Router } from "express";
+import db, { logAudit } from "../db/database";
+import {
+  authenticate,
+  requireFamilyMember,
+  AuthenticatedRequest,
+} from "../middleware/auth";
+
+const router = Router();
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const aiModel = process.env.AI_MODEL_NAME || "gemini-1.5-flash";
+
+// Check AI status
+router.get("/status", (_req, res) => {
+  res.json({
+    configured: Boolean(geminiApiKey && geminiApiKey.trim().length > 0),
+    model: aiModel,
+  });
+});
+
+// Real AI Assistant query with tool execution (Rule 15 - Real AI, zero fake chatbot replies)
+router.post("/:familyId/assist", authenticate, requireFamilyMember, async (req: AuthenticatedRequest, res) => {
+  const familyId = parseInt(req.params.familyId, 10);
+  const userId = req.user!.id;
+  const { message } = req.body;
+
+  if (!geminiApiKey || geminiApiKey.trim().length === 0) {
+    return res.status(503).json({
+      error: "AI Provider is not configured. Set GEMINI_API_KEY in .env to enable the real AI assistant.",
+      configured: false,
+    });
+  }
+
+  if (!message || typeof message !== "string" || message.trim().length === 0) {
+    return res.status(400).json({ error: "Message prompt is required." });
+  }
+
+  try {
+    // 1. Gather ONLY authorized context for this user and family
+    const todayEvents = db.prepare(`
+      SELECT id, title, starts_at, location_name
+      FROM calendar_events
+      WHERE family_id = ? AND date(starts_at) = date('now')
+        AND (visibility = 'family' OR owner_user_id = ? OR assigned_to_user_id = ?)
+    `).all(familyId, userId, userId);
+
+    const pendingTasks = db.prepare(`
+      SELECT id, title, priority, due_date, category
+      FROM tasks
+      WHERE family_id = ? AND status = 'pending'
+      LIMIT 15
+    `).all(familyId);
+
+    const unpurchasedGroceries = db.prepare(`
+      SELECT id, name, quantity, unit, category
+      FROM grocery_items
+      WHERE family_id = ? AND checked = 0
+      LIMIT 15
+    `).all(familyId);
+
+    const carePlans = db.prepare(`
+      SELECT cp.medicine_name, cp.dosage_info, cp.scheduled_times, u.name as subject_name
+      FROM care_plans cp
+      JOIN users u ON u.id = cp.subject_user_id
+      WHERE cp.family_id = ? AND cp.active = 1
+    `).all(familyId);
+
+    const unpaidBills = db.prepare(`
+      SELECT title, amount, currency, due_date
+      FROM bills
+      WHERE family_id = ? AND status = 'unpaid'
+    `).all(familyId);
+
+    const members = db.prepare(`
+      SELECT u.name, fm.role
+      FROM family_memberships fm
+      JOIN users u ON u.id = fm.user_id
+      WHERE fm.family_id = ? AND fm.status = 'active'
+    `).all(familyId);
+
+    const promptContext = `
+You are the dedicated HomeSync Household AI Assistant for this household.
+User Name: ${req.user!.name}
+Today's Date: ${new Date().toISOString().split("T")[0]}
+
+AUTHORIZED HOUSEHOLD DATA (STRICT SOURCE OF TRUTH):
+- Members: ${JSON.stringify(members)}
+- Today's Events: ${JSON.stringify(todayEvents)}
+- Pending Household Chores & Tasks: ${JSON.stringify(pendingTasks)}
+- Unpurchased Grocery List: ${JSON.stringify(unpurchasedGroceries)}
+- Medicine Schedules: ${JSON.stringify(carePlans)}
+- Unpaid Household Bills: ${JSON.stringify(unpaidBills)}
+
+STRICT OPERATIONAL RULES:
+1. STRICT IN-APP FOCUS: Answer ONLY about this household's schedules, tasks, groceries, medicines, chores, and members.
+2. SPEED & CONCISENESS: Keep answers direct, rapid, helpful, and concise. No conversational fluff.
+3. NO OUTSIDE CONTENT: Do not answer unrelated general internet trivia, external political or entertainment topics. If asked, politely redirect the user back to their household management.
+4. ACTION PROPOSALS: If the user wants to add groceries, tasks, or calendar events, include the structured JSON below:
+ACTION_JSON:
+{
+  "action": "add_grocery" | "add_task" | "add_event" | "none",
+  "data": { ... }
+}
+For add_grocery: {"name": string, "quantity": number, "unit": string, "category": string}
+For add_task: {"title": string, "priority": "low"|"medium"|"high"|"urgent", "category": string}
+For add_event: {"title": string, "startsAt": ISOString}
+
+User Query: "${message}"
+`;
+
+    // Query Gemini API directly
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${aiModel}:generateContent?key=${geminiApiKey}`;
+    const geminiRes = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: promptContext }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 800 },
+      }),
+    });
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      throw new Error(`Gemini API error (${geminiRes.status}): ${errText}`);
+    }
+
+    const geminiData = await geminiRes.json();
+    const replyText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated by model.";
+
+    // Parse any proposed action
+    let executedAction = null;
+    const actionMatch = replyText.match(/ACTION_JSON:\s*(\{[\s\S]*?\})/);
+    if (actionMatch) {
+      try {
+        const actionObj = JSON.parse(actionMatch[1]);
+        if (actionObj.action === "add_grocery" && actionObj.data?.name) {
+          const list = db.prepare("SELECT id FROM grocery_lists WHERE family_id = ? LIMIT 1").get(familyId) as any;
+          if (list) {
+            const ins = db.prepare(`
+              INSERT INTO grocery_items (list_id, family_id, creator_user_id, name, quantity, unit, category, checked)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            `).run(
+              list.id,
+              familyId,
+              userId,
+              actionObj.data.name,
+              parseFloat(actionObj.data.quantity) || 1,
+              actionObj.data.unit || "pcs",
+              actionObj.data.category || "Produce"
+            );
+            executedAction = { type: "add_grocery", id: ins.lastInsertRowid, name: actionObj.data.name };
+            logAudit(familyId, userId, "AI_ACTION_GROCERY_ADDED", "grocery_item", Number(ins.lastInsertRowid), actionObj.data);
+          }
+        } else if (actionObj.action === "add_task" && actionObj.data?.title) {
+          const ins = db.prepare(`
+            INSERT INTO tasks (family_id, creator_user_id, title, priority, category, status)
+            VALUES (?, ?, ?, ?, ?, 'pending')
+          `).run(
+            familyId,
+            userId,
+            actionObj.data.title,
+            actionObj.data.priority || "medium",
+            actionObj.data.category || "General"
+          );
+          executedAction = { type: "add_task", id: ins.lastInsertRowid, title: actionObj.data.title };
+          logAudit(familyId, userId, "AI_ACTION_TASK_ADDED", "task", Number(ins.lastInsertRowid), actionObj.data);
+        }
+      } catch (parseErr) {
+        console.warn("Failed to parse proposed AI action:", parseErr);
+      }
+    }
+
+    // Clean up internal action JSON markers from user-facing text
+    const cleanText = replyText.replace(/ACTION_JSON:\s*\{[\s\S]*?\}/g, "").trim();
+
+    res.json({
+      reply: cleanText,
+      action: executedAction,
+    });
+  } catch (err: any) {
+    console.error("AI assistant error:", err);
+    res.status(500).json({ error: "AI Assistant operation failed: " + err.message });
+  }
+});
+
+export default router;
