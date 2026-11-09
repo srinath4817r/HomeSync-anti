@@ -345,53 +345,55 @@ const App: React.FC = () => {
         />
 
         <main className="page-container" style={{ minWidth: 0 }}>
-          {currentView === "Dashboard" && (
-            <DashboardView
-              family={activeFamily}
-              members={members}
-              onNavigate={(v) => setCurrentView(v)}
-            />
-          )}
+          <div key={currentView} className="view-transition-wrapper">
+            {currentView === "Dashboard" && (
+              <DashboardView
+                family={activeFamily}
+                members={members}
+                onNavigate={(v) => setCurrentView(v)}
+              />
+            )}
 
-          {currentView === "Calendar" && (
-            <CalendarView family={activeFamily} members={members} />
-          )}
+            {currentView === "Calendar" && (
+              <CalendarView family={activeFamily} members={members} />
+            )}
 
-          {currentView === "Tasks" && (
-            <TasksView family={activeFamily} members={members} />
-          )}
+            {currentView === "Tasks" && (
+              <TasksView family={activeFamily} members={members} />
+            )}
 
-          {currentView === "Groceries" && (
-            <GroceriesView family={activeFamily} />
-          )}
+            {currentView === "Groceries" && (
+              <GroceriesView family={activeFamily} />
+            )}
 
-          {currentView === "Care" && (
-            <CareView family={activeFamily} members={members} />
-          )}
+            {currentView === "Care" && (
+              <CareView family={activeFamily} members={members} />
+            )}
 
-          {currentView === "Map" && (
-            <MapView family={activeFamily} />
-          )}
+            {currentView === "Map" && (
+              <MapView family={activeFamily} />
+            )}
 
-          {currentView === "Finance" && (
-            <FinanceView family={activeFamily} members={members} />
-          )}
+            {currentView === "Finance" && (
+              <FinanceView family={activeFamily} members={members} />
+            )}
 
-          {currentView === "Inventory" && (
-            <InventoryView family={activeFamily} />
-          )}
+            {currentView === "Inventory" && (
+              <InventoryView family={activeFamily} />
+            )}
 
-          {currentView === "Documents" && (
-            <DocumentsView family={activeFamily} />
-          )}
+            {currentView === "Documents" && (
+              <DocumentsView family={activeFamily} />
+            )}
 
-          {currentView === "Requests" && (
-            <RequestsView family={activeFamily} members={members} />
-          )}
+            {currentView === "Requests" && (
+              <RequestsView family={activeFamily} members={members} />
+            )}
 
-          {currentView === "Family" && (
-            <FamilyView family={activeFamily} currentUserId={user.id} />
-          )}
+            {currentView === "Family" && (
+              <FamilyView family={activeFamily} currentUserId={user.id} />
+            )}
+          </div>
         </main>
       </div>
 

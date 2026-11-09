@@ -51,7 +51,7 @@ export const Header: React.FC<HeaderProps> = ({
         <span style={{ fontWeight: 800, fontSize: "1.1rem", letterSpacing: "0.02em" }}>HOME SYNC</span>
       </div>
 
-      {/* Glass Search Pill (Desktop/Tablet) */}
+      {/* Search Pill (Desktop/Tablet) */}
       <div className="search-pill-container">
         <Search size={18} strokeWidth={1.8} className="search-icon-inside" />
         <input
@@ -61,6 +61,7 @@ export const Header: React.FC<HeaderProps> = ({
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
         />
+        <span className="search-kbd-hint">⌘K</span>
       </div>
 
       {/* Right Controls */}
